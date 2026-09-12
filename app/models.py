@@ -16,6 +16,7 @@ class PieceSpec(BaseModel):
     anneal_point_c: float = Field(description="退火点 °C")
     strain_point_c: float = Field(description="应变点 °C")
     allowed_delta_t_c: float = Field(gt=0, description="允许的内外温差 °C")
+    zone: Optional[str] = Field(default=None, description="作业时所在探头区域；使用响应档案时必填")
 
     @model_validator(mode="after")
     def _check_points(self) -> "PieceSpec":
@@ -76,6 +77,66 @@ class JobCreate(BaseModel):
     program: KilnProgram
     constraints: Constraints = Field(default_factory=Constraints)
     options: AnalysisOptions = Field(default_factory=AnalysisOptions)
+    load_mass_kg: Optional[float] = Field(
+        default=None, gt=0,
+        description="作业装载质量 kg；指定响应档案 profile_id 时必填，必须落在档案校准范围",
+    )
+    profile_id: Optional[str] = Field(
+        default=None, description="窑炉热响应档案 ID；给定后先预测各区域炉温再做导热判定"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 窑炉热响应档案（FOPDT 辨识）
+# ---------------------------------------------------------------------------
+
+class ProfileSetpoint(BaseModel):
+    """设定温度时间轴（全通道共享，必须单调不减）。"""
+
+    time_min: float = Field(ge=0)
+    temp_c: float
+
+
+class ProfileSample(BaseModel):
+    """热电偶实测点。上传顺序即原始顺序，乱序会被指出而不是静默接受。"""
+
+    time_min: float = Field(ge=0)
+    temp_c: float
+
+
+class ProfileChannel(BaseModel):
+    channel_id: str = Field(min_length=1, description="探头通道编号，档案内唯一")
+    zone: str = Field(min_length=1, description="探头区域标识，作业的 piece.zone 与之对应")
+    position: str = Field(default="", description="探头位置的自由文本标注")
+    sample_interval_min: float = Field(gt=0, description="标称采样间隔 min")
+    samples: List[ProfileSample] = Field(min_length=2)
+
+
+class ProfileCreate(BaseModel):
+    name: str = Field(min_length=1)
+    load_mass_min_kg: float = Field(gt=0, description="校准装载质量下限 kg")
+    load_mass_max_kg: float = Field(gt=0, description="校准装载质量上限 kg")
+    setpoints: List[ProfileSetpoint] = Field(min_length=2, description="设定温度时间轴")
+    channels: List[ProfileChannel] = Field(min_length=1, description="一个或多个热电偶通道")
+    excitation_min_c: float = Field(
+        default=20.0, gt=0, description="温度变化不足判定阈值（有效数据峰峰值）°C"
+    )
+    long_gap_min: Optional[float] = Field(
+        default=None, gt=0,
+        description="长缺口阈值 min；缺省取各通道 10 × 标称采样间隔，缺口区间不参与拟合",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> "ProfileCreate":
+        if self.load_mass_max_kg < self.load_mass_min_kg:
+            raise ValueError("load_mass_max_kg 不能低于 load_mass_min_kg")
+        t = [s.time_min for s in self.setpoints]
+        if any(b <= a for a, b in zip(t, t[1:])):
+            raise ValueError("设定温度时间轴必须严格单调递增")
+        ids = [c.channel_id for c in self.channels]
+        if len(set(ids)) != len(ids):
+            raise ValueError("channel_id 在档案内必须唯一")
+        return self
 
 
 class MeasurementPoint(BaseModel):

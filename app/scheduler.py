@@ -21,6 +21,7 @@ import math
 from typing import Dict, List, Optional
 
 from .analysis import analyze, piece_limits
+from .identification import build_prediction, check_applicability
 from .models import AnalysisOptions, Constraints, KilnProgram, PieceSpec
 from .program import quantize_program
 
@@ -91,11 +92,31 @@ def _compress(
     return changed
 
 
-def optimize(job: dict, safety_factor: float = 0.9, max_iterations: int = 40) -> dict:
+def _rejected(rejections: List[dict]) -> dict:
+    """档案不适用时：拒绝判定安全，排程不得绕过。"""
+    return {"status": "rejected", "rejections": rejections}
+
+
+def optimize(job: dict, safety_factor: float = 0.9, max_iterations: int = 40,
+             profile: Optional[dict] = None) -> dict:
     pieces = [PieceSpec(**p) for p in job["pieces"]]
     constraints = Constraints(**job["constraints"])
     options = AnalysisOptions(**job["options"])
     prog = KilnProgram(**job["program"])
+    load_mass_kg = job.get("load_mass_kg")
+    piece_zones = {p.name: p.zone for p in pieces if p.zone}
+
+    def make_prediction(current: KilnProgram):
+        pred = build_prediction(current, options, profile, piece_zones)
+        rejections = check_applicability(
+            profile, load_mass_kg, piece_zones, pred["setpoint_c"]
+        )
+        return pred, rejections
+
+    if profile is not None:
+        _, rejections = make_prediction(prog)
+        if rejections:
+            return _rejected(rejections)
 
     # 各工件允许的升降温速率上限（°C/min）
     reqs = {p.name: piece_limits(p)[1] for p in pieces}
@@ -118,7 +139,15 @@ def optimize(job: dict, safety_factor: float = 0.9, max_iterations: int = 40) ->
     last: Optional[dict] = None
     for _ in range(max_iterations):
         prog = quantize_program(prog, constraints.min_step_min)
-        res = analyze(pieces, program=prog, constraints=constraints, options=options)
+        if profile is not None:
+            # 每轮（含压缩/降速后）按修改后的程序重新预测局部炉温，
+            # 修订把温区推出校准范围时同样拒绝判定安全
+            pred, rejections = make_prediction(prog)
+            if rejections:
+                return _rejected(rejections)
+            res = analyze(pieces, prediction=pred, constraints=constraints, options=options)
+        else:
+            res = analyze(pieces, program=prog, constraints=constraints, options=options)
         last = res
         viols = res["violations"]
 
