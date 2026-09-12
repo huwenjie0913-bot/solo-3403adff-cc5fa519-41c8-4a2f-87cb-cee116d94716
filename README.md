@@ -33,7 +33,7 @@ python -m pytest tests/              # 测试
 | `thermal_shock` | 热冲击：\|表面−中心\| 超过工件允许温差 |
 | `fast_cooling` | 过快降温：中心穿越退火区间的速率超过该工件 r_max |
 | `center_not_equalized` | 中心未均温：保温段（≥应变点）结束时中心仍滞后 |
-| `program_jump` | 程序跳变：相邻段设定温度不连续 |
+| `program_jump` | 程序跳变：相邻段设定温度不连续，附实际受影响工件（跳变幅值超过其允许温差者） |
 | `kiln_max_temp` | 程序温度超过窑炉最高温 |
 
 ## API 一览
@@ -74,11 +74,14 @@ python -m pytest tests/              # 测试
 ### 排程
 
 `POST /jobs/{id}/schedule` 迭代降低超速段斜率、延长不足的保温，
-段时长对齐最小控温步长。成功返回 `{"status": "ok", "program", "analysis"}`；
+段时长对齐最小控温步长。曲线无违规但超出总时长上限时，会先在安全
+范围内压缩——未锁定段提速至允许上限、缩短未锁定保温段（不低于均温
+所需下限）——确实找不到合规曲线才报告冲突。
+成功返回 `{"status": "ok", "program", "analysis"}`；
 不可行返回 `{"status": "infeasible", "conflicts"}`，冲突类型：
 
 - `locked_segment`：锁定段速率/温度超限，附带受限材料名单；
-- `duration_limit`：满足材料限制所需时长超过总时长上限，指出瓶颈工件；
+- `duration_limit`：压缩后所需时长仍超过总时长上限，指出瓶颈工件；
 - `kiln_max_temp`：退火点高于窑炉上限的材料。
 
 ### 实测复核

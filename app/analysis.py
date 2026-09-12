@@ -4,7 +4,7 @@
 - thermal_shock        热冲击：|表面-中心| 超过工件允许温差
 - fast_cooling         过快降温：中心穿越退火区间的速率超过该工件允许值
 - center_not_equalized 中心未均温：保温段结束时中心与炉温差距过大
-- program_jump         程序跳变：相邻段设定温度不连续（仅名义程序）
+- program_jump         程序跳变：相邻段设定温度不连续（仅名义程序），附实际受影响工件
 - kiln_max_temp        超过窑炉最高温
 
 实测复核：缺测区间（采样间隔超过 max_gap_min）保持未知——
@@ -105,18 +105,31 @@ def analyze(
         return None
 
     violations: List[dict] = []
+    # 程序跳变：设定阶跃几乎瞬间全部落在工件表面与中心之间
+    # （表面跟随炉气的时常远小于中心响应时常），因此跳变幅值超过
+    # 允许温差的工件即为实际受影响工件，按最受限在前列出。
     for j in jumps:
+        mag = abs(j["to_c"] - j["from_c"])
+        affected = sorted(
+            (p for p in pieces if mag > p.allowed_delta_t_c),
+            key=lambda p: p.allowed_delta_t_c,
+        )
+        names = [p.name for p in affected]
+        msg = (
+            f"段 {j['segment_index']} 起点设定从 {j['from_c']:.1f}°C "
+            f"跳变到 {j['to_c']:.1f}°C"
+        )
+        if names:
+            msg += f"，受影响工件: {', '.join(names)}"
         violations.append({
             "type": "program_jump",
-            "piece": None,
+            "piece": names[0] if names else None,
+            "pieces": names,
             "time_min": round(j["time_min"], 3),
             "segment_index": j["segment_index"],
             "value": round(j["to_c"] - j["from_c"], 3),
             "limit": options.jump_tol_c,
-            "message": (
-                f"段 {j['segment_index']} 起点设定从 {j['from_c']:.1f}°C "
-                f"跳变到 {j['to_c']:.1f}°C"
-            ),
+            "message": msg,
         })
 
     if n_valid >= 2:

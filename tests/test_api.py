@@ -79,6 +79,31 @@ def test_program_jump_flagged(client):
     assert jumps and jumps[0]["segment_index"] == 2
 
 
+def test_program_jump_reports_affected_pieces(client):
+    """program_jump 应给出实际受影响工件，而不是固定 piece=None。"""
+    payload = make_job()
+    payload["program"]["segments"][2] = {"kind": "hold", "duration_min": 30.0, "target_c": 850.0}
+    out = create(client, payload)
+    jumps = [v for v in out["analysis"]["violations"] if v["type"] == "program_jump"]
+    assert len(jumps) == 1
+    j = jumps[0]
+    # 40°C 阶跃超过两个工件的允许温差（10°C 与 8°C）
+    assert set(j["pieces"]) == {"A-薄", "B-厚"}
+    assert j["piece"] == "B-厚"  # 最受限的工件排前
+    assert "受影响工件" in j["message"]
+
+
+def test_small_program_jump_affects_nobody(client):
+    """幅值未超过任何工件允许温差的小跳变：仍报告跳变，但无受影响工件。"""
+    payload = make_job()
+    payload["program"]["segments"][2] = {"kind": "hold", "duration_min": 30.0, "target_c": 812.0}
+    out = create(client, payload)
+    jumps = [v for v in out["analysis"]["violations"] if v["type"] == "program_jump"]
+    assert len(jumps) == 1
+    assert jumps[0]["pieces"] == []
+    assert jumps[0]["piece"] is None
+
+
 def test_kiln_max_temp_flagged(client):
     out = create(client, make_job(kiln_max=700.0))
     types = {v["type"] for v in out["analysis"]["violations"]}
@@ -113,12 +138,32 @@ def test_schedule_reports_locked_segment_conflict(client):
 
 
 def test_schedule_reports_duration_limit(client):
-    out = create(client, make_job(max_total=200.0))
+    # 压缩到安全极限后仍需约 165 min，100 min 的上限确实无法满足
+    out = create(client, make_job(max_total=100.0))
     body = client.post(f"/jobs/{out['job_id']}/schedule", json={}).json()
     assert body["status"] == "infeasible"
     dur = [c for c in body["conflicts"] if c["type"] == "duration_limit"]
-    assert dur and dur[0]["required_min"] > 200.0
+    assert dur and dur[0]["required_min"] > 100.0
     assert dur[0]["pieces"] == ["B-厚"]
+
+
+def test_schedule_compresses_before_duration_conflict(client):
+    """无违规但超时长：先提速并缩短未锁定保温，而不是直接报冲突。"""
+    payload = make_job(max_total=230.0)
+    payload["program"]["segments"][4]["locked"] = True  # 锁定 60 min 保温
+    out = create(client, payload)
+    assert out["analysis"]["violations"] == []  # 原曲线本身合规，只是太长
+    assert out["analysis"]["total_duration_min"] > 230.0
+    body = client.post(f"/jobs/{out['job_id']}/schedule", json={}).json()
+    assert body["status"] == "ok"
+    a = body["analysis"]
+    assert a["verdict"] == "pass"
+    assert a["total_duration_min"] <= 230.0 + 1e-6
+    segs = body["program"]["segments"]
+    # 安全范围内提速：不超过最慢工件允许速率 × 安全系数
+    assert 3.0 < segs[0]["rate_c_per_min"] <= 12.0 * 0.9 + 1e-6
+    assert segs[2]["duration_min"] == pytest.approx(15.0)  # 未锁定保温被缩短
+    assert segs[4]["duration_min"] == 60.0  # 锁定保温不动
 
 
 # ---------- 实测复核 ----------
